@@ -289,4 +289,50 @@ final class RealmMappableTests: XCTestCase {
             macros: testMacros
         )
     }
+    
+    func testMapPropertyExample() throws {
+        assertMacroExpansion(
+            """
+            @RealmMappable
+            class ExampleObject: Object {
+                @Persisted var stringMap: Map<String, String>
+                @Persisted var intMap: Map<String, Int>
+            }
+            """,
+            expandedSource: """
+            class ExampleObject: Object {
+                @Persisted var stringMap: Map<String, String>
+                @Persisted var intMap: Map<String, Int>
+            }
+            
+            struct ReadonlyExampleObject {
+                var stringMap: [String: String]
+                var intMap: [String: Int]
+            
+                init(from persistedObject: ExampleObject) {
+                    self.stringMap = Dictionary(persistedObject.stringMap.map {
+                            ($0.key, $0.value)
+                        })
+                    self.intMap = Dictionary(persistedObject.intMap.map {
+                            ($0.key, $0.value)
+                        })
+                }
+            
+                func buildPersistedObject() -> ExampleObject {
+                    let object = ExampleObject()
+            
+                    for (key, value) in self.stringMap {
+                        object.stringMap[key] = value
+                    }
+                    for (key, value) in self.intMap {
+                        object.intMap[key] = value
+                    }
+            
+                    return object
+                }
+            }
+            """,
+            macros: testMacros
+        )
+    }
 }

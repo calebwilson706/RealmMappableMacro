@@ -102,6 +102,43 @@ public struct RealmMappableMacro: PeerMacro {
                                 }
                             }
                         }
+                        // Add support for Map type
+                        else if baseType.hasPrefix("Map<") {
+                            // Extract key and value types
+                            let typeComponents = baseType
+                                .replacingOccurrences(of: "Map<", with: "")
+                                .replacingOccurrences(of: ">", with: "")
+                                .components(separatedBy: ", ")
+                            
+                            guard typeComponents.count == 2 else {
+                                continue
+                            }
+                            
+                            let keyType = typeComponents[0]
+                            let valueType = typeComponents[1]
+                            
+                            if isSwiftPrimitiveType(valueType) {
+                                // Standard dictionary of primitives
+                                structProperties.append("var \(propertyName): [\(keyType): \(valueType)]\(isOptional ? "?" : "")")
+                                if isOptional {
+                                    initAssignments.append("self.\(propertyName) = persistedObject.\(propertyName).map { Dictionary($0.map { ($0.key, $0.value) }) }")
+                                    buildAssignments.append("if let \(propertyName) = self.\(propertyName) {\n            for (key, value) in \(propertyName) {\n                object.\(propertyName)![key] = value\n            }\n        }")
+                                } else {
+                                    initAssignments.append("self.\(propertyName) = Dictionary(persistedObject.\(propertyName).map { ($0.key, $0.value) })")
+                                    buildAssignments.append("for (key, value) in self.\(propertyName) {\n            object.\(propertyName)[key] = value\n        }")
+                                }
+                            } else {
+                                // Dictionary with custom object values
+                                structProperties.append("var \(propertyName): [\(keyType): Readonly\(valueType)]\(isOptional ? "?" : "")")
+                                if isOptional {
+                                    initAssignments.append("self.\(propertyName) = persistedObject.\(propertyName).map { Dictionary($0.map { ($0.key, Readonly\(valueType)(from: $0.value)) }) }")
+                                    buildAssignments.append("if let \(propertyName) = self.\(propertyName) {\n            for (key, value) in \(propertyName) {\n                object.\(propertyName)![key] = value.buildPersistedObject()\n            }\n        }")
+                                } else {
+                                    initAssignments.append("self.\(propertyName) = Dictionary(persistedObject.\(propertyName).map { ($0.key, Readonly\(valueType)(from: $0.value)) })")
+                                    buildAssignments.append("for (key, value) in self.\(propertyName) {\n            object.\(propertyName)[key] = value.buildPersistedObject()\n        }")
+                                }
+                            }
+                        }
                         // Check if it's an embedded object type
                         else if !isSwiftPrimitiveType(baseType) && !baseType.contains("<") && !baseType.contains("(") {
                             // Assume it's a custom object that might be mappable
