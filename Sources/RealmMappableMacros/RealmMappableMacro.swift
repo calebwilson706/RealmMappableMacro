@@ -2,9 +2,18 @@ import SwiftCompilerPlugin
 import SwiftSyntax
 import SwiftSyntaxBuilder
 import SwiftSyntaxMacros
+import Foundation
 
 enum MacroError: Error {
     case notAttachedToClass
+    case invalidMappingMode
+}
+
+/// Defines the mapping mode for the RealmMappable macro
+enum MappingMode: String {
+    case readonly = "readonly"
+    case observable = "observable"
+    case standard // Default when no mode is specified
 }
 
 public struct RealmMappableMacro: PeerMacro {
@@ -17,146 +26,104 @@ public struct RealmMappableMacro: PeerMacro {
             throw MacroError.notAttachedToClass
         }
 
-        let className = classDecl.name.text
-        let structName = "Readonly" + className
+        // Parse the mapping mode from arguments
+        let mode: MappingMode
+        if let argumentList = node.arguments?.as(LabeledExprListSyntax.self),
+           let firstArg = argumentList.first?.expression.as(MemberAccessExprSyntax.self) {
+            if let modeValue = MappingMode(rawValue: firstArg.declName.baseName.text) {
+                mode = modeValue
+            } else {
+                throw MacroError.invalidMappingMode
+            }
+        } else if let argumentText = node.arguments?.description.trimmingCharacters(in: .whitespacesAndNewlines),
+                  let modeValue = MappingMode(rawValue: argumentText.trimmingCharacters(in: CharacterSet(charactersIn: "()\"'"))) {
+            mode = modeValue
+        } else {
+            mode = .standard
+        }
         
+        let isObservable = mode == .observable
+        let isReadonly = mode == .readonly || mode == .standard // Standard mode defaults to readonly behavior
+        
+        let className = classDecl.name.text
+        let structOrClassName = isReadonly ? "Readonly" + className : "Observable" + className
+        let structOrClassKeyword = isObservable ? "class" : "struct"
+        let observableMacro = isObservable ? "@Observable" : ""
+
         // Find all persisted properties
         var structProperties = [String]()
         var initAssignments = [String]()
         var buildAssignments = [String]()
-        
+
         for member in classDecl.memberBlock.members {
             guard let varDecl = member.decl.as(VariableDeclSyntax.self),
                   let binding = varDecl.bindings.first,
                   let type = binding.typeAnnotation?.type else {
                 continue
             }
-            
-            // Check if the variable has an @Persisted attribute
+
             for attribute in varDecl.attributes {
                 if let attributeIdent = attribute.as(AttributeSyntax.self)?.attributeName.as(IdentifierTypeSyntax.self),
                    attributeIdent.name.text == "Persisted" {
-                    
-                    // Found a persisted property, extract its name and type
+
                     if let pattern = binding.pattern.as(IdentifierPatternSyntax.self) {
                         let propertyName = pattern.identifier.text
                         let propertyType = type.trimmedDescription
-                        
-                        // Check if the type is optional
-                        let isOptional = propertyType.hasSuffix("?")
-                        let baseType = isOptional ? String(propertyType.dropLast()) : propertyType
 
-                        // Handle different types
-                        if baseType.hasPrefix("List<") {
-                            // Extract inner type
-                            let innerType = baseType
-                                .replacingOccurrences(of: "List<", with: "")
-                                .replacingOccurrences(of: ">", with: "")
-                            
+                        if propertyType.hasPrefix("List<") {
+                            let innerType = propertyType.replacingOccurrences(of: "List<", with: "").replacingOccurrences(of: ">", with: "")
                             if isSwiftPrimitiveType(innerType) {
-                                // Standard list of primitives
-                                structProperties.append("var \(propertyName): [\(innerType)]\(isOptional ? "?" : "")")
-                                if isOptional {
-                                    initAssignments.append("self.\(propertyName) = persistedObject.\(propertyName).map { Array($0) }")
-                                    buildAssignments.append("if let \(propertyName) = self.\(propertyName) {\n            object.\(propertyName) = List<\(innerType)>()\n            object.\(propertyName)!.append(objectsIn: \(propertyName))\n        }")
-                                } else {
-                                    initAssignments.append("self.\(propertyName) = Array(persistedObject.\(propertyName))")
-                                    buildAssignments.append("object.\(propertyName).append(objectsIn: self.\(propertyName))")
-                                }
+                                structProperties.append("\(isObservable ? "var" : "let") \(propertyName): [\(innerType)]")
+                                initAssignments.append("self.\(propertyName) = Array(persistedObject.\(propertyName))")
+                                buildAssignments.append("object.\(propertyName).append(objectsIn: self.\(propertyName))")
                             } else {
-                                // List of custom objects
-                                structProperties.append("var \(propertyName): [Readonly\(innerType)]\(isOptional ? "?" : "")")
-                                if isOptional {
-                                    initAssignments.append("self.\(propertyName) = persistedObject.\(propertyName).map { $0.map { Readonly\(innerType)(from: $0) } }")
-                                    buildAssignments.append("if let \(propertyName) = self.\(propertyName) {\n            object.\(propertyName) = List<\(innerType)>()\n            object.\(propertyName)!.append(objectsIn: \(propertyName).map { $0.buildPersistedObject() })\n        }")
-                                } else {
-                                    initAssignments.append("self.\(propertyName) = persistedObject.\(propertyName).map { Readonly\(innerType)(from: $0) }")
-                                    buildAssignments.append("object.\(propertyName).append(objectsIn: self.\(propertyName).map { $0.buildPersistedObject() })")
-                                }
+                                structProperties.append("\(isObservable ? "var" : "let") \(propertyName): [Readonly\(innerType)]")
+                                initAssignments.append("self.\(propertyName) = persistedObject.\(propertyName).map { Readonly\(innerType)(from: $0) }")
+                                buildAssignments.append("object.\(propertyName).append(objectsIn: self.\(propertyName).map { $0.buildPersistedObject() })")
                             }
-                        } else if baseType.hasPrefix("MutableSet<") {
-                            // Extract inner type
-                            let innerType = baseType
-                                .replacingOccurrences(of: "MutableSet<", with: "")
-                                .replacingOccurrences(of: ">", with: "")
-                            
-                            if isSwiftPrimitiveType(innerType) {
-                                // Standard set of primitives
-                                structProperties.append("var \(propertyName): Set<\(innerType)>\(isOptional ? "?" : "")")
-                                if isOptional {
-                                    initAssignments.append("self.\(propertyName) = persistedObject.\(propertyName).map { Set($0) }")
-                                    buildAssignments.append("if let \(propertyName) = self.\(propertyName) {\n            object.\(propertyName) = MutableSet<\(innerType)>()\n            for item in \(propertyName) {\n                object.\(propertyName)!.insert(item)\n            }\n        }")
-                                } else {
-                                    initAssignments.append("self.\(propertyName) = Set(persistedObject.\(propertyName))")
-                                    buildAssignments.append("for item in self.\(propertyName) {\n            object.\(propertyName).insert(item)\n        }")
-                                }
-                            } else {
-                                // Set of custom objects
-                                structProperties.append("var \(propertyName): Set<Readonly\(innerType)>\(isOptional ? "?" : "")")
-                                if isOptional {
-                                    initAssignments.append("self.\(propertyName) = persistedObject.\(propertyName).map { Set($0.map { Readonly\(innerType)(from: $0) }) }")
-                                    buildAssignments.append("if let \(propertyName) = self.\(propertyName) {\n            object.\(propertyName) = MutableSet<\(innerType)>()\n            for item in \(propertyName) {\n                object.\(propertyName)!.insert(item.buildPersistedObject())\n            }\n        }")
-                                } else {
-                                    initAssignments.append("self.\(propertyName) = Set(persistedObject.\(propertyName).map { Readonly\(innerType)(from: $0) })")
-                                    buildAssignments.append("for item in self.\(propertyName) {\n            object.\(propertyName).insert(item.buildPersistedObject())\n        }")
-                                }
-                            }
-                        }
-                        // Add support for Map type
-                        else if baseType.hasPrefix("Map<") {
-                            // Extract key and value types
-                            let typeComponents = baseType
-                                .replacingOccurrences(of: "Map<", with: "")
-                                .replacingOccurrences(of: ">", with: "")
-                                .components(separatedBy: ", ")
-                            
-                            guard typeComponents.count == 2 else {
-                                continue
-                            }
-                            
-                            let keyType = typeComponents[0]
-                            let valueType = typeComponents[1]
-                            
-                            if isSwiftPrimitiveType(valueType) {
-                                // Standard dictionary of primitives
-                                structProperties.append("var \(propertyName): [\(keyType): \(valueType)]\(isOptional ? "?" : "")")
-                                if isOptional {
-                                    initAssignments.append("self.\(propertyName) = persistedObject.\(propertyName).map { Dictionary($0.map { ($0.key, $0.value) }) }")
-                                    buildAssignments.append("if let \(propertyName) = self.\(propertyName) {\n            for (key, value) in \(propertyName) {\n                object.\(propertyName)![key] = value\n            }\n        }")
-                                } else {
+                        } else if propertyType.hasPrefix("Map<") {
+                            let typeComponents = propertyType.replacingOccurrences(of: "Map<", with: "").replacingOccurrences(of: ">", with: "").components(separatedBy: ", ")
+                            if typeComponents.count == 2 {
+                                let keyType = typeComponents[0]
+                                let valueType = typeComponents[1]
+                                if isSwiftPrimitiveType(valueType) {
+                                    structProperties.append("\(isObservable ? "var" : "let") \(propertyName): [\(keyType): \(valueType)]")
                                     initAssignments.append("self.\(propertyName) = Dictionary(persistedObject.\(propertyName).map { ($0.key, $0.value) })")
-                                    buildAssignments.append("for (key, value) in self.\(propertyName) {\n            object.\(propertyName)[key] = value\n        }")
-                                }
-                            } else {
-                                // Dictionary with custom object values
-                                structProperties.append("var \(propertyName): [\(keyType): Readonly\(valueType)]\(isOptional ? "?" : "")")
-                                if isOptional {
-                                    initAssignments.append("self.\(propertyName) = persistedObject.\(propertyName).map { Dictionary($0.map { ($0.key, Readonly\(valueType)(from: $0.value)) }) }")
-                                    buildAssignments.append("if let \(propertyName) = self.\(propertyName) {\n            for (key, value) in \(propertyName) {\n                object.\(propertyName)![key] = value.buildPersistedObject()\n            }\n        }")
+                                    buildAssignments.append("for (key, value) in self.\(propertyName) { object.\(propertyName)[key] = value }")
                                 } else {
+                                    structProperties.append("\(isObservable ? "var" : "let") \(propertyName): [\(keyType): Readonly\(valueType)]")
                                     initAssignments.append("self.\(propertyName) = Dictionary(persistedObject.\(propertyName).map { ($0.key, Readonly\(valueType)(from: $0.value)) })")
-                                    buildAssignments.append("for (key, value) in self.\(propertyName) {\n            object.\(propertyName)[key] = value.buildPersistedObject()\n        }")
+                                    buildAssignments.append("for (key, value) in self.\(propertyName) { object.\(propertyName)[key] = value.buildPersistedObject() }")
                                 }
                             }
-                        }
-                        // Check if it's an embedded object type
-                        else if !isSwiftPrimitiveType(baseType) && !baseType.contains("<") && !baseType.contains("(") {
-                            // Assume it's a custom object that might be mappable
-                            structProperties.append("var \(propertyName): Readonly\(baseType)\(isOptional ? "?" : "")")
-                            if isOptional {
-                                // Format this exactly to match the test's expected output
-                                initAssignments.append("""
-                                self.\(propertyName) = persistedObject.\(propertyName).map { 
-                                    ReadonlyExampleObjectEmbedded(from: $0) 
-                                }
-                                """.trimmingLeadingWhitespace())
+                        } else if propertyType.hasPrefix("MutableSet<") {
+                            let innerType = propertyType.replacingOccurrences(of: "MutableSet<", with: "").replacingOccurrences(of: ">", with: "")
+                            if isSwiftPrimitiveType(innerType) {
+                                structProperties.append("\(isObservable ? "var" : "let") \(propertyName): Set<\(innerType)>")
+                                initAssignments.append("self.\(propertyName) = Set(persistedObject.\(propertyName))")
+                                buildAssignments.append("for item in self.\(propertyName) { object.\(propertyName).insert(item) }")
+                            } else {
+                                structProperties.append("\(isObservable ? "var" : "let") \(propertyName): Set<Readonly\(innerType)>")
+                                initAssignments.append("self.\(propertyName) = Set(persistedObject.\(propertyName).map { Readonly\(innerType)(from: $0) })")
+                                buildAssignments.append("for item in self.\(propertyName) { object.\(propertyName).insert(item.buildPersistedObject()) }")
+                            }
+                        } else if propertyType.hasSuffix("?") {
+                            let baseType = String(propertyType.dropLast())
+                            if (!isSwiftPrimitiveType(baseType)) {
+                                structProperties.append("\(isObservable ? "var" : "let") \(propertyName): Readonly\(baseType)?")
+                                initAssignments.append("self.\(propertyName) = persistedObject.\(propertyName).map { Readonly\(baseType)(from: $0) }")
                                 buildAssignments.append("object.\(propertyName) = self.\(propertyName)?.buildPersistedObject()")
                             } else {
-                                initAssignments.append("self.\(propertyName) = Readonly\(baseType)(from: persistedObject.\(propertyName))")
-                                buildAssignments.append("object.\(propertyName) = self.\(propertyName).buildPersistedObject()")
+                                structProperties.append("\(isObservable ? "var" : "let") \(propertyName): \(propertyType)")
+                                initAssignments.append("self.\(propertyName) = persistedObject.\(propertyName)")
+                                buildAssignments.append("object.\(propertyName) = self.\(propertyName)")
                             }
+                        } else if !isSwiftPrimitiveType(propertyType) {
+                            structProperties.append("\(isObservable ? "var" : "let") \(propertyName): Readonly\(propertyType)")
+                            initAssignments.append("self.\(propertyName) = Readonly\(propertyType)(from: persistedObject.\(propertyName))")
+                            buildAssignments.append("object.\(propertyName) = self.\(propertyName).buildPersistedObject()")
                         } else {
-                            structProperties.append("var \(propertyName): \(propertyType)")
+                            structProperties.append("\(isObservable ? "var" : "let") \(propertyName): \(propertyType)")
                             initAssignments.append("self.\(propertyName) = persistedObject.\(propertyName)")
                             buildAssignments.append("object.\(propertyName) = self.\(propertyName)")
                         }
@@ -164,26 +131,27 @@ public struct RealmMappableMacro: PeerMacro {
                 }
             }
         }
-        
-        let structDecl = """
-        struct \(structName) {
+
+        let structOrClassDecl = """
+        \(observableMacro)
+        \(structOrClassKeyword) \(structOrClassName) {
             \(structProperties.joined(separator: "\n    "))
-        
+
             init(from persistedObject: \(className)) {
                 \(initAssignments.joined(separator: "\n        "))
             }
-        
+
             func buildPersistedObject() -> \(className) {
                 let object = \(className)()
-        
+
                 \(buildAssignments.joined(separator: "\n        "))
-        
+
                 return object
             }
         }
         """
 
-        return [DeclSyntax(stringLiteral: structDecl)]
+        return [DeclSyntax(stringLiteral: structOrClassDecl)]
     }
     
     // Helper function to determine if a type is a Swift primitive type

@@ -13,7 +13,7 @@ final class RealmMappableTests: XCTestCase {
     func testAssertBasicUsage() throws {
         assertMacroExpansion(
             """
-            @RealmMappable
+            @RealmMappable(readonly)
             class ExampleObject: Object {
                 @Persisted var name: String
                 @Persisted var age: Int
@@ -28,10 +28,10 @@ final class RealmMappableTests: XCTestCase {
             }
             
             struct ReadonlyExampleObject {
-                var name: String
-                var age: Int
-                var dateOfBirth: Date
-            
+                let name: String
+                let age: Int
+                let dateOfBirth: Date
+
                 init(from persistedObject: ExampleObject) {
                     self.name = persistedObject.name
                     self.age = persistedObject.age
@@ -56,7 +56,7 @@ final class RealmMappableTests: XCTestCase {
     func testAssertSetAndListUsage() throws {
         assertMacroExpansion(
             """
-            @RealmMappable
+            @RealmMappable(readonly)
             class ExampleObject: Object {
                 @Persisted var list: List<String>
                 @Persisted var set: MutableSet<String>
@@ -69,9 +69,9 @@ final class RealmMappableTests: XCTestCase {
             }
             
             struct ReadonlyExampleObject {
-                var list: [String]
-                var set: Set<String>
-            
+                let list: [String]
+                let set: Set<String>
+
                 init(from persistedObject: ExampleObject) {
                     self.list = Array(persistedObject.list)
                     self.set = Set(persistedObject.set)
@@ -96,12 +96,12 @@ final class RealmMappableTests: XCTestCase {
     func testNestedObjectsExample() throws {
         assertMacroExpansion(
             """
-            @RealmMappable
+            @RealmMappable(readonly)
             class ExampleObject: Object {
                 @Persisted var child: ExampleObjectEmbedded
             }
-            
-            @RealmMappable
+
+            @RealmMappable(readonly)
             class ExampleObjectEmbedded: EmbeddedObject {
                 @Persisted var name: String
                 @Persisted var age: Int
@@ -113,8 +113,8 @@ final class RealmMappableTests: XCTestCase {
             }
             
             struct ReadonlyExampleObject {
-                var child: ReadonlyExampleObjectEmbedded
-            
+                let child: ReadonlyExampleObjectEmbedded
+
                 init(from persistedObject: ExampleObject) {
                     self.child = ReadonlyExampleObjectEmbedded(from: persistedObject.child)
                 }
@@ -133,9 +133,9 @@ final class RealmMappableTests: XCTestCase {
             }
             
             struct ReadonlyExampleObjectEmbedded {
-                var name: String
-                var age: Int
-            
+                let name: String
+                let age: Int
+
                 init(from persistedObject: ExampleObjectEmbedded) {
                     self.name = persistedObject.name
                     self.age = persistedObject.age
@@ -175,7 +175,7 @@ final class RealmMappableTests: XCTestCase {
             }
             
             struct ReadonlyExampleObject {
-                var children: [ReadonlyExampleObjectEmbedded]
+                let children: [ReadonlyExampleObjectEmbedded]
             
                 init(from persistedObject: ExampleObject) {
                     self.children = persistedObject.children.map {
@@ -199,8 +199,8 @@ final class RealmMappableTests: XCTestCase {
             }
             
             struct ReadonlyExampleObjectEmbedded {
-                var name: String
-                var age: Int
+                let name: String
+                let age: Int
             
                 init(from persistedObject: ExampleObjectEmbedded) {
                     self.name = persistedObject.name
@@ -244,9 +244,9 @@ final class RealmMappableTests: XCTestCase {
             }
             
             struct ReadonlyExampleObject {
-                var optionalString: String?
-                var optionalInt: Int?
-                var optionalEmbedded: ReadonlyExampleObjectEmbedded?
+                let optionalString: String?
+                let optionalInt: Int?
+                let optionalEmbedded: ReadonlyExampleObjectEmbedded?
             
                 init(from persistedObject: ExampleObject) {
                     self.optionalString = persistedObject.optionalString
@@ -271,7 +271,7 @@ final class RealmMappableTests: XCTestCase {
             }
             
             struct ReadonlyExampleObjectEmbedded {
-                var name: String
+                let name: String
             
                 init(from persistedObject: ExampleObjectEmbedded) {
                     self.name = persistedObject.name
@@ -306,8 +306,8 @@ final class RealmMappableTests: XCTestCase {
             }
             
             struct ReadonlyExampleObject {
-                var stringMap: [String: String]
-                var intMap: [String: Int]
+                let stringMap: [String: String]
+                let intMap: [String: Int]
             
                 init(from persistedObject: ExampleObject) {
                     self.stringMap = Dictionary(persistedObject.stringMap.map {
@@ -327,6 +327,83 @@ final class RealmMappableTests: XCTestCase {
                     for (key, value) in self.intMap {
                         object.intMap[key] = value
                     }
+            
+                    return object
+                }
+            }
+            """,
+            macros: testMacros
+        )
+    }
+
+    func testReadonlyMacroExpansion() throws {
+        assertMacroExpansion(
+            """
+            @RealmMappable(readonly)
+            class ExampleObject: Object {
+                @Persisted var name: String
+                @Persisted var age: Int
+            }
+            """,
+            expandedSource: """
+            class ExampleObject: Object {
+                @Persisted var name: String
+                @Persisted var age: Int
+            }
+
+            struct ReadonlyExampleObject {
+                let name: String
+                let age: Int
+
+                init(from persistedObject: ExampleObject) {
+                    self.name = persistedObject.name
+                    self.age = persistedObject.age
+                }
+
+                func buildPersistedObject() -> ExampleObject {
+                    let object = ExampleObject()
+            
+                    object.name = self.name
+                    object.age = self.age
+            
+                    return object
+                }
+            }
+            """,
+            macros: testMacros
+        )
+    }
+
+    func testObservableMacroExpansion() throws {
+        assertMacroExpansion(
+            """
+            @RealmMappable(observable)
+            class ExampleObject: Object {
+                @Persisted var name: String
+                @Persisted var age: Int
+            }
+            """,
+            expandedSource: """
+            class ExampleObject: Object {
+                @Persisted var name: String
+                @Persisted var age: Int
+            }
+            
+            @Observable
+            class ExampleObject {
+                var name: String
+                var age: Int
+
+                init(from persistedObject: ExampleObject) {
+                    self.name = persistedObject.name
+                    self.age = persistedObject.age
+                }
+
+                func buildPersistedObject() -> ExampleObject {
+                    let object = ExampleObject()
+            
+                    object.name = self.name
+                    object.age = self.age
             
                     return object
                 }
