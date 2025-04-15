@@ -49,6 +49,9 @@ public struct RealmMappableMacro: PeerMacro {
         let structOrClassName = isReadonly ? "Readonly" + className : "Observable" + className
         let structOrClassKeyword = isObservable ? "class" : "struct"
         let observableMacro = isObservable ? "@Observable" : ""
+        
+        // Use the appropriate prefix based on the mode
+        let nestedTypePrefix = isObservable ? "Observable" : "Readonly"
 
         // Find all persisted properties
         var structProperties = [String]()
@@ -77,8 +80,8 @@ public struct RealmMappableMacro: PeerMacro {
                                 initAssignments.append("self.\(propertyName) = Array(persistedObject.\(propertyName))")
                                 buildAssignments.append("object.\(propertyName).append(objectsIn: self.\(propertyName))")
                             } else {
-                                structProperties.append("\(isObservable ? "var" : "let") \(propertyName): [Readonly\(innerType)]")
-                                initAssignments.append("self.\(propertyName) = persistedObject.\(propertyName).map { Readonly\(innerType)(from: $0) }")
+                                structProperties.append("\(isObservable ? "var" : "let") \(propertyName): [\(nestedTypePrefix)\(innerType)]")
+                                initAssignments.append("self.\(propertyName) = persistedObject.\(propertyName).map { \(nestedTypePrefix)\(innerType)(from: $0) }")
                                 buildAssignments.append("object.\(propertyName).append(objectsIn: self.\(propertyName).map { $0.buildPersistedObject() })")
                             }
                         } else if propertyType.hasPrefix("Map<") {
@@ -91,8 +94,8 @@ public struct RealmMappableMacro: PeerMacro {
                                     initAssignments.append("self.\(propertyName) = Dictionary(persistedObject.\(propertyName).map { ($0.key, $0.value) })")
                                     buildAssignments.append("for (key, value) in self.\(propertyName) { object.\(propertyName)[key] = value }")
                                 } else {
-                                    structProperties.append("\(isObservable ? "var" : "let") \(propertyName): [\(keyType): Readonly\(valueType)]")
-                                    initAssignments.append("self.\(propertyName) = Dictionary(persistedObject.\(propertyName).map { ($0.key, Readonly\(valueType)(from: $0.value)) })")
+                                    structProperties.append("\(isObservable ? "var" : "let") \(propertyName): [\(keyType): \(nestedTypePrefix)\(valueType)]")
+                                    initAssignments.append("self.\(propertyName) = Dictionary(persistedObject.\(propertyName).map { ($0.key, \(nestedTypePrefix)\(valueType)(from: $0.value)) })")
                                     buildAssignments.append("for (key, value) in self.\(propertyName) { object.\(propertyName)[key] = value.buildPersistedObject() }")
                                 }
                             }
@@ -103,15 +106,15 @@ public struct RealmMappableMacro: PeerMacro {
                                 initAssignments.append("self.\(propertyName) = Set(persistedObject.\(propertyName))")
                                 buildAssignments.append("for item in self.\(propertyName) { object.\(propertyName).insert(item) }")
                             } else {
-                                structProperties.append("\(isObservable ? "var" : "let") \(propertyName): Set<Readonly\(innerType)>")
-                                initAssignments.append("self.\(propertyName) = Set(persistedObject.\(propertyName).map { Readonly\(innerType)(from: $0) })")
+                                structProperties.append("\(isObservable ? "var" : "let") \(propertyName): Set<\(nestedTypePrefix)\(innerType)>")
+                                initAssignments.append("self.\(propertyName) = Set(persistedObject.\(propertyName).map { \(nestedTypePrefix)\(innerType)(from: $0) })")
                                 buildAssignments.append("for item in self.\(propertyName) { object.\(propertyName).insert(item.buildPersistedObject()) }")
                             }
                         } else if propertyType.hasSuffix("?") {
                             let baseType = String(propertyType.dropLast())
                             if (!isSwiftPrimitiveType(baseType)) {
-                                structProperties.append("\(isObservable ? "var" : "let") \(propertyName): Readonly\(baseType)?")
-                                initAssignments.append("self.\(propertyName) = persistedObject.\(propertyName).map { Readonly\(baseType)(from: $0) }")
+                                structProperties.append("\(isObservable ? "var" : "let") \(propertyName): \(nestedTypePrefix)\(baseType)?")
+                                initAssignments.append("self.\(propertyName) = persistedObject.\(propertyName).map { \(nestedTypePrefix)\(baseType)(from: $0) }")
                                 buildAssignments.append("object.\(propertyName) = self.\(propertyName)?.buildPersistedObject()")
                             } else {
                                 structProperties.append("\(isObservable ? "var" : "let") \(propertyName): \(propertyType)")
@@ -119,8 +122,8 @@ public struct RealmMappableMacro: PeerMacro {
                                 buildAssignments.append("object.\(propertyName) = self.\(propertyName)")
                             }
                         } else if !isSwiftPrimitiveType(propertyType) {
-                            structProperties.append("\(isObservable ? "var" : "let") \(propertyName): Readonly\(propertyType)")
-                            initAssignments.append("self.\(propertyName) = Readonly\(propertyType)(from: persistedObject.\(propertyName))")
+                            structProperties.append("\(isObservable ? "var" : "let") \(propertyName): \(nestedTypePrefix)\(propertyType)")
+                            initAssignments.append("self.\(propertyName) = \(nestedTypePrefix)\(propertyType)(from: persistedObject.\(propertyName))")
                             buildAssignments.append("object.\(propertyName) = self.\(propertyName).buildPersistedObject()")
                         } else {
                             structProperties.append("\(isObservable ? "var" : "let") \(propertyName): \(propertyType)")

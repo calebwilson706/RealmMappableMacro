@@ -377,7 +377,7 @@ final class RealmMappableTests: XCTestCase {
     func testObservableMacroExpansion() throws {
         assertMacroExpansion(
             """
-            @RealmMappable(observable)
+            @RealmMappable(.observable)
             class ExampleObject: Object {
                 @Persisted var name: String
                 @Persisted var age: Int
@@ -390,7 +390,7 @@ final class RealmMappableTests: XCTestCase {
             }
             
             @Observable
-            class ExampleObject {
+            class ObservableExampleObject {
                 var name: String
                 var age: Int
 
@@ -404,6 +404,255 @@ final class RealmMappableTests: XCTestCase {
             
                     object.name = self.name
                     object.age = self.age
+            
+                    return object
+                }
+            }
+            """,
+            macros: testMacros
+        )
+    }
+
+    func testObservableWithNestedObject() throws {
+        assertMacroExpansion(
+            """
+            @RealmMappable(.observable)
+            class ExampleObject: Object {
+                @Persisted var child: ExampleObjectEmbedded
+            }
+
+            @RealmMappable(.observable)
+            class ExampleObjectEmbedded: EmbeddedObject {
+                @Persisted var name: String
+                @Persisted var age: Int
+            }
+            """,
+            expandedSource: """
+            class ExampleObject: Object {
+                @Persisted var child: ExampleObjectEmbedded
+            }
+            
+            @Observable
+            class ObservableExampleObject {
+                var child: ObservableExampleObjectEmbedded
+
+                init(from persistedObject: ExampleObject) {
+                    self.child = ObservableExampleObjectEmbedded(from: persistedObject.child)
+                }
+            
+                func buildPersistedObject() -> ExampleObject {
+                    let object = ExampleObject()
+            
+                    object.child = self.child.buildPersistedObject()
+            
+                    return object
+                }
+            }
+            class ExampleObjectEmbedded: EmbeddedObject {
+                @Persisted var name: String
+                @Persisted var age: Int
+            }
+            
+            @Observable
+            class ObservableExampleObjectEmbedded {
+                var name: String
+                var age: Int
+
+                init(from persistedObject: ExampleObjectEmbedded) {
+                    self.name = persistedObject.name
+                    self.age = persistedObject.age
+                }
+
+                func buildPersistedObject() -> ExampleObjectEmbedded {
+                    let object = ExampleObjectEmbedded()
+            
+                    object.name = self.name
+                    object.age = self.age
+            
+                    return object
+                }
+            }
+            """,
+            macros: testMacros
+        )
+    }
+
+    func testObservableWithList() throws {
+        assertMacroExpansion(
+            """
+            @RealmMappable(.observable)
+            class ExampleObject: Object {
+                @Persisted var children: List<ExampleObjectEmbedded>
+            }
+            
+            @RealmMappable(.observable)
+            class ExampleObjectEmbedded: EmbeddedObject {
+                @Persisted var name: String
+                @Persisted var age: Int
+            }
+            """,
+            expandedSource: """
+            class ExampleObject: Object {
+                @Persisted var children: List<ExampleObjectEmbedded>
+            }
+            
+            @Observable
+            class ObservableExampleObject {
+                var children: [ObservableExampleObjectEmbedded]
+            
+                init(from persistedObject: ExampleObject) {
+                    self.children = persistedObject.children.map {
+                        ObservableExampleObjectEmbedded(from: $0)
+                    }
+                }
+            
+                func buildPersistedObject() -> ExampleObject {
+                    let object = ExampleObject()
+            
+                    object.children.append(objectsIn: self.children.map {
+                            $0.buildPersistedObject()
+                        })
+            
+                    return object
+                }
+            }
+            class ExampleObjectEmbedded: EmbeddedObject {
+                @Persisted var name: String
+                @Persisted var age: Int
+            }
+            
+            @Observable
+            class ObservableExampleObjectEmbedded {
+                var name: String
+                var age: Int
+            
+                init(from persistedObject: ExampleObjectEmbedded) {
+                    self.name = persistedObject.name
+                    self.age = persistedObject.age
+                }
+
+                func buildPersistedObject() -> ExampleObjectEmbedded {
+                    let object = ExampleObjectEmbedded()
+            
+                    object.name = self.name
+                    object.age = self.age
+            
+                    return object
+                }
+            }
+            """,
+            macros: testMacros
+        )
+    }
+
+    func testObservableWithMap() throws {
+        assertMacroExpansion(
+            """
+            @RealmMappable(.observable)
+            class ExampleObject: Object {
+                @Persisted var stringMap: Map<String, String>
+                @Persisted var intMap: Map<String, Int>
+            }
+            """,
+            expandedSource: """
+            class ExampleObject: Object {
+                @Persisted var stringMap: Map<String, String>
+                @Persisted var intMap: Map<String, Int>
+            }
+            
+            @Observable
+            class ObservableExampleObject {
+                var stringMap: [String: String]
+                var intMap: [String: Int]
+            
+                init(from persistedObject: ExampleObject) {
+                    self.stringMap = Dictionary(persistedObject.stringMap.map {
+                            ($0.key, $0.value)
+                        })
+                    self.intMap = Dictionary(persistedObject.intMap.map {
+                            ($0.key, $0.value)
+                        })
+                }
+            
+                func buildPersistedObject() -> ExampleObject {
+                    let object = ExampleObject()
+            
+                    for (key, value) in self.stringMap {
+                        object.stringMap[key] = value
+                    }
+                    for (key, value) in self.intMap {
+                        object.intMap[key] = value
+                    }
+            
+                    return object
+                }
+            }
+            """,
+            macros: testMacros
+        )
+    }
+
+    func testObservableWithSet() throws {
+        assertMacroExpansion(
+            """
+            @RealmMappable(.observable)
+            class ExampleObject: Object {
+                @Persisted var items: MutableSet<String>
+                @Persisted var complexItems: MutableSet<ExampleObjectEmbedded>
+            }
+            
+            @RealmMappable(.observable)
+            class ExampleObjectEmbedded: EmbeddedObject {
+                @Persisted var name: String
+            }
+            """,
+            expandedSource: """
+            class ExampleObject: Object {
+                @Persisted var items: MutableSet<String>
+                @Persisted var complexItems: MutableSet<ExampleObjectEmbedded>
+            }
+            
+            @Observable
+            class ObservableExampleObject {
+                var items: Set<String>
+                var complexItems: Set<ObservableExampleObjectEmbedded>
+            
+                init(from persistedObject: ExampleObject) {
+                    self.items = Set(persistedObject.items)
+                    self.complexItems = Set(persistedObject.complexItems.map {
+                            ObservableExampleObjectEmbedded(from: $0)
+                        })
+                }
+            
+                func buildPersistedObject() -> ExampleObject {
+                    let object = ExampleObject()
+            
+                    for item in self.items {
+                        object.items.insert(item)
+                    }
+                    for item in self.complexItems {
+                        object.complexItems.insert(item.buildPersistedObject())
+                    }
+            
+                    return object
+                }
+            }
+            class ExampleObjectEmbedded: EmbeddedObject {
+                @Persisted var name: String
+            }
+            
+            @Observable
+            class ObservableExampleObjectEmbedded {
+                var name: String
+            
+                init(from persistedObject: ExampleObjectEmbedded) {
+                    self.name = persistedObject.name
+                }
+
+                func buildPersistedObject() -> ExampleObjectEmbedded {
+                    let object = ExampleObjectEmbedded()
+            
+                    object.name = self.name
             
                     return object
                 }
