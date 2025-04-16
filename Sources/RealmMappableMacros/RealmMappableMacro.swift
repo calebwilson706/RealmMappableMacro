@@ -16,6 +16,15 @@ enum MappingMode: String {
     case standard // Default when no mode is specified
 }
 
+/// Represents a property to be mapped between Realm and its wrapper type
+struct PropertyInfo {
+    let name: String
+    let realmType: String
+    let wrapperType: String
+    let initAssignment: String
+    let buildAssignment: String
+}
+
 public struct RealmMappableMacro: PeerMacro {
     public static func expansion(
         of node: SwiftSyntax.AttributeSyntax,
@@ -27,118 +36,312 @@ public struct RealmMappableMacro: PeerMacro {
         }
 
         // Parse the mapping mode from arguments
-        let mode: MappingMode
+        let mode = try parseMappingMode(from: node)
+        let isObservable = mode == .observable
+        let isReadonly = mode == .readonly || mode == .standard // Standard mode defaults to readonly behavior
+        
+        let className = classDecl.name.text
+        let nestedTypePrefix = isObservable ? "Observable" : "Readonly"
+        
+        // Find all persisted properties
+        var properties = [PropertyInfo]()
+
+        for member in classDecl.memberBlock.members {
+            if let property = try? parsePersistedProperty(
+                from: member,
+                isObservable: isObservable,
+                nestedTypePrefix: nestedTypePrefix
+            ) {
+                properties.append(property)
+            }
+        }
+
+        // Generate the output struct or class declaration
+        return [generateOutputDeclaration(
+            className: className,
+            isObservable: isObservable,
+            properties: properties
+        )]
+    }
+    
+    // MARK: - Helper Functions
+    
+    /// Parse the mapping mode from the attribute node
+    private static func parseMappingMode(from node: AttributeSyntax) throws -> MappingMode {
         if let argumentList = node.arguments?.as(LabeledExprListSyntax.self),
            let firstArg = argumentList.first?.expression.as(MemberAccessExprSyntax.self) {
             if let modeValue = MappingMode(rawValue: firstArg.declName.baseName.text) {
-                mode = modeValue
+                return modeValue
             } else {
                 throw MacroError.invalidMappingMode
             }
         } else if let argumentText = node.arguments?.description.trimmingCharacters(in: .whitespacesAndNewlines),
                   let modeValue = MappingMode(rawValue: argumentText.trimmingCharacters(in: CharacterSet(charactersIn: "()\"'"))) {
-            mode = modeValue
-        } else {
-            mode = .standard
+            return modeValue
         }
         
-        let isObservable = mode == .observable
-        let isReadonly = mode == .readonly || mode == .standard // Standard mode defaults to readonly behavior
+        return .standard
+    }
+    
+    /// Parse a persisted property from a member declaration
+    private static func parsePersistedProperty(
+        from member: MemberBlockItemSyntax,
+        isObservable: Bool,
+        nestedTypePrefix: String
+    ) throws -> PropertyInfo? {
+        guard let varDecl = member.decl.as(VariableDeclSyntax.self),
+              let binding = varDecl.bindings.first,
+              let type = binding.typeAnnotation?.type else {
+            return nil
+        }
         
-        let className = classDecl.name.text
-        let structOrClassName = isReadonly ? "Readonly" + className : "Observable" + className
+        // Check if this is a @Persisted property
+        var isPersistedProperty = false
+        for attribute in varDecl.attributes {
+            if let attributeIdent = attribute.as(AttributeSyntax.self)?.attributeName.as(IdentifierTypeSyntax.self),
+               attributeIdent.name.text == "Persisted" {
+                isPersistedProperty = true
+                break
+            }
+        }
+        
+        guard isPersistedProperty,
+              let pattern = binding.pattern.as(IdentifierPatternSyntax.self) else {
+            return nil
+        }
+        
+        let propertyName = pattern.identifier.text
+        let propertyType = type.trimmedDescription
+        
+        // Process the property based on its type
+        if propertyType.hasPrefix("List<") {
+            return processListProperty(
+                name: propertyName,
+                type: propertyType,
+                isObservable: isObservable,
+                nestedTypePrefix: nestedTypePrefix
+            )
+        } else if propertyType.hasPrefix("Map<") {
+            return processMapProperty(
+                name: propertyName,
+                type: propertyType,
+                isObservable: isObservable,
+                nestedTypePrefix: nestedTypePrefix
+            )
+        } else if propertyType.hasPrefix("MutableSet<") {
+            return processSetProperty(
+                name: propertyName,
+                type: propertyType,
+                isObservable: isObservable,
+                nestedTypePrefix: nestedTypePrefix
+            )
+        } else if propertyType.hasSuffix("?") {
+            return processOptionalProperty(
+                name: propertyName,
+                type: propertyType,
+                isObservable: isObservable,
+                nestedTypePrefix: nestedTypePrefix
+            )
+        } else if !isSwiftPrimitiveType(propertyType) {
+            return processComplexProperty(
+                name: propertyName,
+                type: propertyType,
+                isObservable: isObservable,
+                nestedTypePrefix: nestedTypePrefix
+            )
+        } else {
+            return processPrimitiveProperty(
+                name: propertyName,
+                type: propertyType,
+                isObservable: isObservable
+            )
+        }
+    }
+    
+    /// Process a property of type List<T>
+    private static func processListProperty(
+        name: String,
+        type: String,
+        isObservable: Bool,
+        nestedTypePrefix: String
+    ) -> PropertyInfo {
+        let innerType = type.replacingOccurrences(of: "List<", with: "")
+                           .replacingOccurrences(of: ">", with: "")
+        
+        let letOrVar = isObservable ? "var" : "let"
+        
+        if isSwiftPrimitiveType(innerType) {
+            return PropertyInfo(
+                name: name,
+                realmType: type,
+                wrapperType: "\(letOrVar) \(name): [\(innerType)]",
+                initAssignment: "self.\(name) = Array(persistedObject.\(name))",
+                buildAssignment: "object.\(name).append(objectsIn: self.\(name))"
+            )
+        } else {
+            return PropertyInfo(
+                name: name,
+                realmType: type,
+                wrapperType: "\(letOrVar) \(name): [\(nestedTypePrefix)\(innerType)]",
+                initAssignment: "self.\(name) = persistedObject.\(name).map { \(nestedTypePrefix)\(innerType)(from: $0) }",
+                buildAssignment: "object.\(name).append(objectsIn: self.\(name).map { $0.buildPersistedObject() })"
+            )
+        }
+    }
+    
+    /// Process a property of type Map<K, V>
+    private static func processMapProperty(
+        name: String,
+        type: String,
+        isObservable: Bool,
+        nestedTypePrefix: String
+    ) -> PropertyInfo {
+        let typeComponents = type.replacingOccurrences(of: "Map<", with: "")
+                               .replacingOccurrences(of: ">", with: "")
+                               .components(separatedBy: ", ")
+        
+        let letOrVar = isObservable ? "var" : "let"
+        
+        if typeComponents.count == 2 {
+            let keyType = typeComponents[0]
+            let valueType = typeComponents[1]
+            
+            if isSwiftPrimitiveType(valueType) {
+                return PropertyInfo(
+                    name: name,
+                    realmType: type,
+                    wrapperType: "\(letOrVar) \(name): [\(keyType): \(valueType)]",
+                    initAssignment: "self.\(name) = Dictionary(persistedObject.\(name).map { ($0.key, $0.value) })",
+                    buildAssignment: "for (key, value) in self.\(name) { object.\(name)[key] = value }"
+                )
+            } else {
+                return PropertyInfo(
+                    name: name,
+                    realmType: type,
+                    wrapperType: "\(letOrVar) \(name): [\(keyType): \(nestedTypePrefix)\(valueType)]",
+                    initAssignment: "self.\(name) = Dictionary(persistedObject.\(name).map { ($0.key, \(nestedTypePrefix)\(valueType)(from: $0.value)) })",
+                    buildAssignment: "for (key, value) in self.\(name) { object.\(name)[key] = value.buildPersistedObject() }"
+                )
+            }
+        }
+        
+        // Fallback (should never happen with valid Map types)
+        return processPrimitiveProperty(name: name, type: type, isObservable: isObservable)
+    }
+    
+    /// Process a property of type MutableSet<T>
+    private static func processSetProperty(
+        name: String,
+        type: String,
+        isObservable: Bool,
+        nestedTypePrefix: String
+    ) -> PropertyInfo {
+        let innerType = type.replacingOccurrences(of: "MutableSet<", with: "")
+                           .replacingOccurrences(of: ">", with: "")
+        
+        let letOrVar = isObservable ? "var" : "let"
+        
+        if isSwiftPrimitiveType(innerType) {
+            return PropertyInfo(
+                name: name,
+                realmType: type,
+                wrapperType: "\(letOrVar) \(name): Set<\(innerType)>",
+                initAssignment: "self.\(name) = Set(persistedObject.\(name))",
+                buildAssignment: "for item in self.\(name) { object.\(name).insert(item) }"
+            )
+        } else {
+            return PropertyInfo(
+                name: name,
+                realmType: type,
+                wrapperType: "\(letOrVar) \(name): Set<\(nestedTypePrefix)\(innerType)>",
+                initAssignment: "self.\(name) = Set(persistedObject.\(name).map { \(nestedTypePrefix)\(innerType)(from: $0) })",
+                buildAssignment: "for item in self.\(name) { object.\(name).insert(item.buildPersistedObject()) }"
+            )
+        }
+    }
+    
+    /// Process an optional property
+    private static func processOptionalProperty(
+        name: String,
+        type: String,
+        isObservable: Bool,
+        nestedTypePrefix: String
+    ) -> PropertyInfo {
+        let baseType = String(type.dropLast())
+        let letOrVar = isObservable ? "var" : "let"
+        
+        if !isSwiftPrimitiveType(baseType) {
+            return PropertyInfo(
+                name: name,
+                realmType: type,
+                wrapperType: "\(letOrVar) \(name): \(nestedTypePrefix)\(baseType)?",
+                initAssignment: "self.\(name) = persistedObject.\(name).map { \(nestedTypePrefix)\(baseType)(from: $0) }",
+                buildAssignment: "object.\(name) = self.\(name)?.buildPersistedObject()"
+            )
+        } else {
+            return PropertyInfo(
+                name: name,
+                realmType: type,
+                wrapperType: "\(letOrVar) \(name): \(type)",
+                initAssignment: "self.\(name) = persistedObject.\(name)",
+                buildAssignment: "object.\(name) = self.\(name)"
+            )
+        }
+    }
+    
+    /// Process a complex object property (non-primitive)
+    private static func processComplexProperty(
+        name: String,
+        type: String,
+        isObservable: Bool,
+        nestedTypePrefix: String
+    ) -> PropertyInfo {
+        let letOrVar = isObservable ? "var" : "let"
+        
+        return PropertyInfo(
+            name: name,
+            realmType: type,
+            wrapperType: "\(letOrVar) \(name): \(nestedTypePrefix)\(type)",
+            initAssignment: "self.\(name) = \(nestedTypePrefix)\(type)(from: persistedObject.\(name))",
+            buildAssignment: "object.\(name) = self.\(name).buildPersistedObject()"
+        )
+    }
+    
+    /// Process a primitive property
+    private static func processPrimitiveProperty(
+        name: String,
+        type: String,
+        isObservable: Bool
+    ) -> PropertyInfo {
+        let letOrVar = isObservable ? "var" : "let"
+        
+        return PropertyInfo(
+            name: name,
+            realmType: type,
+            wrapperType: "\(letOrVar) \(name): \(type)",
+            initAssignment: "self.\(name) = persistedObject.\(name)",
+            buildAssignment: "object.\(name) = self.\(name)"
+        )
+    }
+    
+    /// Generate the final output declaration
+    private static func generateOutputDeclaration(
+        className: String,
+        isObservable: Bool,
+        properties: [PropertyInfo]
+    ) -> DeclSyntax {
+        let structOrClassName = isObservable ? "Observable" + className : "Readonly" + className
         let structOrClassKeyword = isObservable ? "class" : "struct"
         let observableMacro = isObservable ? "@Observable" : ""
         
-        // Use the appropriate prefix based on the mode
-        let nestedTypePrefix = isObservable ? "Observable" : "Readonly"
-
-        // Find all persisted properties
-        var structProperties = [String]()
-        var initAssignments = [String]()
-        var buildAssignments = [String]()
-
-        for member in classDecl.memberBlock.members {
-            guard let varDecl = member.decl.as(VariableDeclSyntax.self),
-                  let binding = varDecl.bindings.first,
-                  let type = binding.typeAnnotation?.type else {
-                continue
-            }
-
-            for attribute in varDecl.attributes {
-                if let attributeIdent = attribute.as(AttributeSyntax.self)?.attributeName.as(IdentifierTypeSyntax.self),
-                   attributeIdent.name.text == "Persisted" {
-
-                    if let pattern = binding.pattern.as(IdentifierPatternSyntax.self) {
-                        let propertyName = pattern.identifier.text
-                        let propertyType = type.trimmedDescription
-
-                        if propertyType.hasPrefix("List<") {
-                            let innerType = propertyType.replacingOccurrences(of: "List<", with: "").replacingOccurrences(of: ">", with: "")
-                            if isSwiftPrimitiveType(innerType) {
-                                structProperties.append("\(isObservable ? "var" : "let") \(propertyName): [\(innerType)]")
-                                initAssignments.append("self.\(propertyName) = Array(persistedObject.\(propertyName))")
-                                buildAssignments.append("object.\(propertyName).append(objectsIn: self.\(propertyName))")
-                            } else {
-                                structProperties.append("\(isObservable ? "var" : "let") \(propertyName): [\(nestedTypePrefix)\(innerType)]")
-                                initAssignments.append("self.\(propertyName) = persistedObject.\(propertyName).map { \(nestedTypePrefix)\(innerType)(from: $0) }")
-                                buildAssignments.append("object.\(propertyName).append(objectsIn: self.\(propertyName).map { $0.buildPersistedObject() })")
-                            }
-                        } else if propertyType.hasPrefix("Map<") {
-                            let typeComponents = propertyType.replacingOccurrences(of: "Map<", with: "").replacingOccurrences(of: ">", with: "").components(separatedBy: ", ")
-                            if typeComponents.count == 2 {
-                                let keyType = typeComponents[0]
-                                let valueType = typeComponents[1]
-                                if isSwiftPrimitiveType(valueType) {
-                                    structProperties.append("\(isObservable ? "var" : "let") \(propertyName): [\(keyType): \(valueType)]")
-                                    initAssignments.append("self.\(propertyName) = Dictionary(persistedObject.\(propertyName).map { ($0.key, $0.value) })")
-                                    buildAssignments.append("for (key, value) in self.\(propertyName) { object.\(propertyName)[key] = value }")
-                                } else {
-                                    structProperties.append("\(isObservable ? "var" : "let") \(propertyName): [\(keyType): \(nestedTypePrefix)\(valueType)]")
-                                    initAssignments.append("self.\(propertyName) = Dictionary(persistedObject.\(propertyName).map { ($0.key, \(nestedTypePrefix)\(valueType)(from: $0.value)) })")
-                                    buildAssignments.append("for (key, value) in self.\(propertyName) { object.\(propertyName)[key] = value.buildPersistedObject() }")
-                                }
-                            }
-                        } else if propertyType.hasPrefix("MutableSet<") {
-                            let innerType = propertyType.replacingOccurrences(of: "MutableSet<", with: "").replacingOccurrences(of: ">", with: "")
-                            if isSwiftPrimitiveType(innerType) {
-                                structProperties.append("\(isObservable ? "var" : "let") \(propertyName): Set<\(innerType)>")
-                                initAssignments.append("self.\(propertyName) = Set(persistedObject.\(propertyName))")
-                                buildAssignments.append("for item in self.\(propertyName) { object.\(propertyName).insert(item) }")
-                            } else {
-                                structProperties.append("\(isObservable ? "var" : "let") \(propertyName): Set<\(nestedTypePrefix)\(innerType)>")
-                                initAssignments.append("self.\(propertyName) = Set(persistedObject.\(propertyName).map { \(nestedTypePrefix)\(innerType)(from: $0) })")
-                                buildAssignments.append("for item in self.\(propertyName) { object.\(propertyName).insert(item.buildPersistedObject()) }")
-                            }
-                        } else if propertyType.hasSuffix("?") {
-                            let baseType = String(propertyType.dropLast())
-                            if (!isSwiftPrimitiveType(baseType)) {
-                                structProperties.append("\(isObservable ? "var" : "let") \(propertyName): \(nestedTypePrefix)\(baseType)?")
-                                initAssignments.append("self.\(propertyName) = persistedObject.\(propertyName).map { \(nestedTypePrefix)\(baseType)(from: $0) }")
-                                buildAssignments.append("object.\(propertyName) = self.\(propertyName)?.buildPersistedObject()")
-                            } else {
-                                structProperties.append("\(isObservable ? "var" : "let") \(propertyName): \(propertyType)")
-                                initAssignments.append("self.\(propertyName) = persistedObject.\(propertyName)")
-                                buildAssignments.append("object.\(propertyName) = self.\(propertyName)")
-                            }
-                        } else if !isSwiftPrimitiveType(propertyType) {
-                            structProperties.append("\(isObservable ? "var" : "let") \(propertyName): \(nestedTypePrefix)\(propertyType)")
-                            initAssignments.append("self.\(propertyName) = \(nestedTypePrefix)\(propertyType)(from: persistedObject.\(propertyName))")
-                            buildAssignments.append("object.\(propertyName) = self.\(propertyName).buildPersistedObject()")
-                        } else {
-                            structProperties.append("\(isObservable ? "var" : "let") \(propertyName): \(propertyType)")
-                            initAssignments.append("self.\(propertyName) = persistedObject.\(propertyName)")
-                            buildAssignments.append("object.\(propertyName) = self.\(propertyName)")
-                        }
-                    }
-                }
-            }
-        }
-
+        let propertyDeclarations = properties.map { $0.wrapperType }
+        let initAssignments = properties.map { $0.initAssignment }
+        let buildAssignments = properties.map { $0.buildAssignment }
+        
         let structOrClassDecl = """
         \(observableMacro)
         \(structOrClassKeyword) \(structOrClassName) {
-            \(structProperties.joined(separator: "\n    "))
+            \(propertyDeclarations.joined(separator: "\n    "))
 
             init(from persistedObject: \(className)) {
                 \(initAssignments.joined(separator: "\n        "))
@@ -154,7 +357,7 @@ public struct RealmMappableMacro: PeerMacro {
         }
         """
 
-        return [DeclSyntax(stringLiteral: structOrClassDecl)]
+        return DeclSyntax(stringLiteral: structOrClassDecl)
     }
     
     // Helper function to determine if a type is a Swift primitive type
