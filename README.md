@@ -206,4 +206,4 @@ let firstMember = team.members.first
 
 ## License
 
-[Include your license info here]
+RealmMappable is available under the MIT License. See the [LICENSE](LICENSE) file for more information.
